@@ -42,7 +42,9 @@ def DifferenceEqualOpportunity(y_pred,y_real,SensitiveCat, outcome, privileged, 
     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix(y_real_priv[outcome],y_priv, labels=labels).ravel()
     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix(y_real_unpriv[outcome], y_unpriv, labels=labels).ravel()
 
-    return abs(TP_unpriv/(TP_unpriv+FN_unpriv) - TP_priv/(TP_priv+FN_priv))
+    # 添加一个小的正常数以防止除以零
+    epsilon = 1e-10
+    return abs(TP_unpriv/(TP_unpriv+FN_unpriv+epsilon) - TP_priv/(TP_priv+FN_priv+epsilon))
 
 def DifferenceAverageOdds(y_pred,y_real,SensitiveCat, outcome, privileged, unprivileged,labels):
     '''
@@ -62,4 +64,53 @@ def DifferenceAverageOdds(y_pred,y_real,SensitiveCat, outcome, privileged, unpri
     y_real_unpriv = y_real[y_real[SensitiveCat] == unprivileged]
     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix(y_real_priv[outcome], y_priv,  labels=labels).ravel()
     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix(y_real_unpriv[outcome], y_unpriv,  labels=labels).ravel()
-    return 0.5*(abs(FP_unpriv/(FP_unpriv+TN_unpriv)-FP_priv/(FP_priv+TN_priv))+abs(TP_unpriv/(TP_unpriv+FN_unpriv)-TP_priv/(TP_priv+FN_priv)))
+
+    # 添加一个小的正常数以防止除以零
+    epsilon = 1e-10
+    return 0.5*(abs(FP_unpriv/(FP_unpriv+TN_unpriv+epsilon)-FP_priv/(FP_priv+TN_priv+epsilon))+abs(TP_unpriv/(TP_unpriv+FN_unpriv+epsilon)-TP_priv/(TP_priv+FN_priv+epsilon)))
+
+
+# def DifferenceEqualOpportunity(y_pred,y_real,SensitiveCat, outcome, privileged, unprivileged, labels):
+#     '''
+#     ABS Difference in True positive Rate between the two groups
+#     :param y_pred: prediction
+#     :param y_real: real label
+#     :param SensitiveCat: Sensitive feature name
+#     :param outcome: Outcome feature name
+#     :param privileged: value of the privileged group
+#     :param unprivileged: value of the unprivileged group
+#     :param labels: both priv-unpriv value for CFmatrix
+#     :return:
+#     '''
+#     y_priv = y_pred[y_real[SensitiveCat]==privileged]
+#     y_real_priv = y_real[y_real[SensitiveCat]==privileged]
+#     y_unpriv = y_pred[y_real[SensitiveCat]==unprivileged]
+#     y_real_unpriv = y_real[y_real[SensitiveCat]==unprivileged]
+#     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix(y_real_priv[outcome],y_priv, labels=labels).ravel()
+#     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix(y_real_unpriv[outcome], y_unpriv, labels=labels).ravel()
+#
+#     # 添加一个小的正常数以防止除以零
+#     epsilon = 1e-10
+#     return abs(TP_unpriv/(TP_unpriv+FN_unpriv) - TP_priv/(TP_priv+FN_priv+epsilon))
+
+
+
+# def DifferenceAverageOdds(y_pred,y_real,SensitiveCat, outcome, privileged, unprivileged,labels):
+#     '''
+#     Mean ABS difference in True positive rate and False positive rate of the two groups
+#     :param y_pred:
+#     :param y_real:
+#     :param SensitiveCat:
+#     :param outcome:
+#     :param privileged:
+#     :param unprivileged:
+#     :param labels:
+#     :return:
+#     '''
+#     y_priv = y_pred[y_real[SensitiveCat] == privileged]
+#     y_real_priv = y_real[y_real[SensitiveCat] == privileged]
+#     y_unpriv = y_pred[y_real[SensitiveCat] == unprivileged]
+#     y_real_unpriv = y_real[y_real[SensitiveCat] == unprivileged]
+#     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix(y_real_priv[outcome], y_priv,  labels=labels).ravel()
+#     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix(y_real_unpriv[outcome], y_unpriv,  labels=labels).ravel()
+#     return 0.5*(abs(FP_unpriv/(FP_unpriv+TN_unpriv)-FP_priv/(FP_priv+TN_priv))+abs(TP_unpriv/(TP_unpriv+FN_unpriv)-TP_priv/(TP_priv+FN_priv)))
