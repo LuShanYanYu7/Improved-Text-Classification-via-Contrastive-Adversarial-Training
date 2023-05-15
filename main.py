@@ -1,4 +1,5 @@
 import torch
+import subprocess
 import torch.nn as nn
 import pandas as pd
 import numpy as np
@@ -8,16 +9,44 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 
 
+def get_gpu_memory():
+    _output_to_list = lambda x: x.decode('ascii').split('\n')[:-1]
+
+    ACCEPTABLE_AVAILABLE_MEMORY = 1024 * 1024  # bytes
+    COMMAND = "nvidia-smi --query-gpu=memory.free --format=csv"
+
+    memory_free_info = _output_to_list(subprocess.check_output(COMMAND.split()))[1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values
+
+
+def get_best_device():
+    if torch.cuda.is_available():
+        best_device = None
+        best_memory = 0
+        for i in range(torch.cuda.device_count()):
+            device = torch.device(f"cuda:{i}")
+            available = get_gpu_memory()[i]
+            if available > best_memory:
+                best_memory = available
+                best_device = device
+        return best_device
+    else:
+        return torch.device("cpu")
+
+
 # 初始化模型和分词器
 model_name = 'bert-base-uncased'
 model = BertModel.from_pretrained(model_name)
 tokenizer = BertTokenizer.from_pretrained("./bert-base-uncased")
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = get_best_device()
 model.to(device)
 
 
 # 定义一个线性分类器
-classifier = nn.Linear(model.config.hidden_size, 2).to(device)  # 假设任务是二分类任务
+# 假设任务是二分类任务
+num_labels = 2
+classifier = nn.Linear(model.config.hidden_size, num_labels).to(device)
 
 
 # 定义一个MLP
@@ -29,7 +58,7 @@ mlp = nn.Sequential(
 
 
 # 初始化优化器
-optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()), lr=0.001)
+optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()), lr=2e-5)
 
 
 # 用于计算cosine similarity的函数
@@ -94,99 +123,91 @@ train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
 
+epoch = 5
 # 开始训练模型
-# 开始训练模型
-for batch in train_loader:
-    inputs = {name: tensor.to(model.device) for name, tensor in batch.items() if name in ['input_ids', 'attention_mask']}
-    labels = batch['label'].to(model.device)
-    protected = batch['protected'].to(model.device)
+for epoch in range(epochs):
+    total_loss = 0
+    total_correct = 0
+    total_examples = 0
+    total_DAO = 0
+    total_DEO = 0
 
-    # 计算模型的输出
-    outputs = model(**inputs)[0][:,0,:]
+    # 开始训练模式
+    model.train()
+    classifier.train()
 
-    # 计算原始的分类器损失
-    logits = classifier(outputs)
-    original_loss = cross_entropy(logits, labels)
+    for batch in train_loader:
+        inputs = {name: tensor.to(model.device) for name, tensor in batch.items() if name in ['input_ids', 'attention_mask']}
+        labels = batch['label'].to(model.device)
+        protected = batch['protected'].to(model.device)
 
-    # 计算损失函数关于输入的梯度
-    inputs['input_ids'].requires_grad = True
-    original_loss.backward()
+        # 计算模型的输出
+        outputs = model(**inputs)[0][:,0,:]
 
-    # 应用FGSM
-    sign_gradient = inputs['input_ids'].grad.data.sign()
-    perturbed_input_ids = inputs['input_ids'] + epsilon * sign_gradient
+        # 计算原始的分类器损失
+        logits = classifier(outputs)
+        original_loss = cross_entropy(logits, labels)
 
-    # 将对抗样本输入模型
-    perturbed_outputs = model(input_ids=perturbed_input_ids, attention_mask=inputs['attention_mask'])[0][:,0,:]
+        # 计算损失函数关于输入的梯度
+        inputs['input_ids'].requires_grad = True
+        original_loss.backward()
 
-    # 计算扰动后的分类器损失
-    perturbed_logits = classifier(perturbed_outputs)
-    perturbed_loss = cross_entropy(perturbed_logits, labels)
+        # 应用FGSM
+        sign_gradient = inputs['input_ids'].grad.data.sign()
+        perturbed_input_ids = inputs['input_ids'] + epsilon * sign_gradient
 
-    # 计算MLP损失
-    mlp_outputs = mlp(outputs)
-    mlp_perturbed_outputs = mlp(perturbed_outputs)
-    mlp_similarity_loss = 1 - cosine_similarity(mlp_outputs, mlp_perturbed_outputs).mean()
+        # 将对抗样本输入模型
+        perturbed_outputs = model(input_ids=perturbed_input_ids, attention_mask=inputs['attention_mask'])[0][:,0,:]
 
-    # 计算总损失
-    total_loss = original_loss + perturbed_loss + mlp_similarity_loss
-    print(f"Total loss: {total_loss.item()}")
+        # 计算扰动后的分类器损失
+        perturbed_logits = classifier(perturbed_outputs)
+        perturbed_loss = cross_entropy(perturbed_logits, labels)
 
-    # 反向传播和优化
-    total_loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
+        # 计算MLP损失
+        mlp_outputs = mlp(outputs)
+        mlp_perturbed_outputs = mlp(perturbed_outputs)
+        mlp_similarity_loss = 1 - cosine_similarity(mlp_outputs, mlp_perturbed_outputs).mean()
 
+        # 计算总损失
+        total_batch_loss = original_loss + perturbed_loss + mlp_similarity_loss
+        total_loss += total_batch_loss.item()
 
-# text = "This is an example sentence for BERT."
-# label = torch.tensor([1])  # 假设该句子的标签是1
-#
-# # 对输入进行编码，然后将其转换为PyTorch张量
-# inputs = tokenizer(text, return_tensors='pt')
-# inputs = {name: tensor.to(model.device) for name, tensor in inputs.items()}
-#
-# # 计算模型的输出
-# outputs = model(**inputs)
-#
-# # 对原始输出应用分类器
-# classifier_outputs = classifier(outputs.logits)
-#
-# # 计算分类器的损失
-# classifier_loss = cross_entropy(classifier_outputs, label)
-#
-# # 计算损失函数关于输入的梯度
-# inputs['input_ids'].requires_grad = True
-# classifier_loss.backward(retain_graph=True)
-#
-# # 应用FGSM
-# epsilon = 0.01
-# sign_gradient = inputs['input_ids'].grad.data.sign()
-# perturbed_input_ids = inputs['input_ids'] + epsilon * sign_gradient
-#
-# # 将对抗样本输入模型
-# perturbed_outputs = model(input_ids=perturbed_input_ids, attention_mask=inputs['attention_mask'])
-#
-# # 对扰动后的输出应用分类器
-# perturbed_classifier_outputs = classifier(perturbed_outputs.logits)
-#
-# # 计算扰动后的分类器损失
-# perturbed_classifier_loss = cross_entropy(perturbed_classifier_outputs, label)
-#
-# # 通过MLP计算相似性损失
-# mlp_outputs = mlp(outputs.logits)
-# mlp_perturbed_outputs = mlp(perturbed_outputs.logits)
-# mlp_similarity_loss = 1 - cosine_similarity(mlp_outputs, mlp_perturbed_outputs).mean()
-#
-# # 计算总损失
-# total_loss = classifier_loss + perturbed_classifier_loss + mlp_similarity_loss
-#
-# # 初始化优化器，注意这里只包括了BERT模型和分类器的参数，没有包括MLP的参数
-# optimizer = Adam(list(model.parameters()) + list(classifier.parameters()))
-#
-# # 使用总损失进行反向传播
-# total_loss.backward()
-#
-# # 使用优化器更新参数
-# optimizer.step()
-#
-# print(f"Total loss: {total_loss.item()}")
+        # 反向传播和优化
+        total_batch_loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # 计算准确率
+        _, predicted = torch.max(logits, 1)
+        correct = (predicted == labels).sum().item()
+        total_correct += correct
+        total_examples += labels.size(0)
+
+        # 计算DAO和DEO
+        y_pred = predicted.cpu().numpy()
+        y_real = labels.cpu().numpy()
+        y_pred_series = pd.Series(y_pred.cpu().numpy())
+        y_real_df = pd.DataFrame(y_real.cpu().numpy(), columns=['income'])
+        y_real_df['Age'] = batch['protected'].cpu().numpy()  # 假设'Age'是敏感特征
+        privileged = 1
+        unprivileged = 0
+
+        batch_DEO = DifferenceEqualOpportunity(y_pred_series, y_real_df, 'Age', 'income', privileged,unprivileged, [0, 1])
+        batch_DAO = DifferenceAverageOdds(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged,[0, 1])
+
+        total_DAO += batch_DAO
+        total_DEO += batch_DEO
+
+    # 计算并打印平均损失
+    avg_loss = total_loss / len(train_loader)
+    print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss}")
+
+    # 计算并打印准确率
+    avg_accuracy = total_correct / total_examples
+    print(f"Epoch {epoch+1}/{epochs}, Accuracy: {avg_accuracy}")
+
+    # 计算并打印DAO和DEO
+    avg_DAO = total_DAO / len(train_loader)
+    avg_DEO = total_DEO / len(train_loader)
+    print(f"Epoch {epoch+1}/{epochs}, DAO: {avg_DAO}, DEO: {avg_DEO}")
+
