@@ -7,7 +7,7 @@ import torch.optim as optim
 from transformers import BertTokenizer, BertModel
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-
+from utils.metrics import DifferenceEqualOpportunity, DifferenceAverageOdds
 
 def get_gpu_memory():
     _output_to_list = lambda x: x.decode('ascii').split('\n')[:-1]
@@ -123,7 +123,8 @@ train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
 
-epoch = 5
+epochs = 5
+# 开始训练模型
 # 开始训练模型
 for epoch in range(epochs):
     total_loss = 0
@@ -146,22 +147,23 @@ for epoch in range(epochs):
 
         # 计算原始的分类器损失
         logits = classifier(outputs)
-        original_loss = cross_entropy(logits, labels)
+        original_loss = nn.functional.cross_entropy(logits, labels)
 
         # 计算损失函数关于输入的梯度
-        inputs['input_ids'].requires_grad = True
-        original_loss.backward()
+        model.embeddings.word_embeddings.weight.requires_grad = True
+        original_loss.backward(retain_graph=True)
 
         # 应用FGSM
-        sign_gradient = inputs['input_ids'].grad.data.sign()
-        perturbed_input_ids = inputs['input_ids'] + epsilon * sign_gradient
+        sign_gradient = model.embeddings.word_embeddings.weight.grad.data.sign()
+        perturbed_embeddings = model.embeddings.word_embeddings.weight + epsilon * sign_gradient
 
         # 将对抗样本输入模型
-        perturbed_outputs = model(input_ids=perturbed_input_ids, attention_mask=inputs['attention_mask'])[0][:,0,:]
+        model.embeddings.word_embeddings.weight.data = perturbed_embeddings
+        perturbed_outputs = model(**inputs)[0][:,0,:]
 
         # 计算扰动后的分类器损失
         perturbed_logits = classifier(perturbed_outputs)
-        perturbed_loss = cross_entropy(perturbed_logits, labels)
+        perturbed_loss = nn.functional.cross_entropy(perturbed_logits, labels)
 
         # 计算MLP损失
         mlp_outputs = mlp(outputs)
@@ -186,28 +188,29 @@ for epoch in range(epochs):
         # 计算DAO和DEO
         y_pred = predicted.cpu().numpy()
         y_real = labels.cpu().numpy()
-        y_pred_series = pd.Series(y_pred.cpu().numpy())
-        y_real_df = pd.DataFrame(y_real.cpu().numpy(), columns=['income'])
+        y_pred_series = pd.Series(y_pred)
+        y_real_df = pd.DataFrame(y_real, columns=['income'])
         y_real_df['Age'] = batch['protected'].cpu().numpy()  # 假设'Age'是敏感特征
         privileged = 1
         unprivileged = 0
 
-        batch_DEO = DifferenceEqualOpportunity(y_pred_series, y_real_df, 'Age', 'income', privileged,unprivileged, [0, 1])
-        batch_DAO = DifferenceAverageOdds(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged,[0, 1])
+        batch_DEO = DifferenceEqualOpportunity(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged,
+                                               [0, 1])
+        batch_DAO = DifferenceAverageOdds(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged, [0, 1])
 
         total_DAO += batch_DAO
         total_DEO += batch_DEO
 
     # 计算并打印平均损失
     avg_loss = total_loss / len(train_loader)
-    print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss}")
+    print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}")
 
     # 计算并打印准确率
     avg_accuracy = total_correct / total_examples
-    print(f"Epoch {epoch+1}/{epochs}, Accuracy: {avg_accuracy}")
+    print(f"Epoch {epoch + 1}/{epochs}, Accuracy: {avg_accuracy}")
 
     # 计算并打印DAO和DEO
     avg_DAO = total_DAO / len(train_loader)
     avg_DEO = total_DEO / len(train_loader)
-    print(f"Epoch {epoch+1}/{epochs}, DAO: {avg_DAO}, DEO: {avg_DEO}")
+    print(f"Epoch {epoch + 1}/{epochs}, DAO: {avg_DAO}, DEO: {avg_DEO}")
 
