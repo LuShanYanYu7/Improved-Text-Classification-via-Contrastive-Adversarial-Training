@@ -39,7 +39,8 @@ def get_best_device():
 model_name = 'bert-base-uncased'
 model = BertModel.from_pretrained(model_name)
 tokenizer = BertTokenizer.from_pretrained("./bert-base-uncased")
-device = get_best_device()
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+# device = get_best_device()
 model.to(device)
 
 
@@ -113,18 +114,20 @@ data = data.dropna()
 train_data, val_data = train_test_split(data, test_size=0.2, random_state=42)
 
 # 请注意，BERT模型通常对自然语言文本的理解能力较强，如果特征本身足够表达它们的含义，那么在某些情况下，不包含列名可能也能取得良好的效果。
-train_data['text'] = train_data.apply(combine_features_raw, axis=1)
-val_data['text'] = val_data.apply(combine_features_raw, axis=1)
+train_data['text'] = train_data.apply(combine_features, axis=1)
+val_data['text'] = val_data.apply(combine_features, axis=1)
 
 train_dataset = AdultDataset(train_data, tokenizer)
 val_dataset = AdultDataset(val_data, tokenizer)
 
 train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+# train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+# val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
 
-epochs = 5
-# 开始训练模型
+# epochs = 5
+epochs = 1
 # 开始训练模型
 for epoch in range(epochs):
     total_loss = 0
@@ -137,7 +140,7 @@ for epoch in range(epochs):
     model.train()
     classifier.train()
 
-    for batch in train_loader:
+    for i, batch in enumerate(train_loader):
         inputs = {name: tensor.to(model.device) for name, tensor in batch.items() if name in ['input_ids', 'attention_mask']}
         labels = batch['label'].to(model.device)
         protected = batch['protected'].to(model.device)
@@ -186,31 +189,32 @@ for epoch in range(epochs):
         total_examples += labels.size(0)
 
         # 计算DAO和DEO
-        y_pred = predicted.cpu().numpy()
-        y_real = labels.cpu().numpy()
-        y_pred_series = pd.Series(y_pred)
-        y_real_df = pd.DataFrame(y_real, columns=['income'])
-        y_real_df['Age'] = batch['protected'].cpu().numpy()  # 假设'Age'是敏感特征
+        y_pred = predicted
+        y_real = {'income': labels, 'Age': batch['protected']}  # 假设'Age'是敏感特征
         privileged = 1
         unprivileged = 0
 
-        batch_DEO = DifferenceEqualOpportunity(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged,
-                                               [0, 1])
-        batch_DAO = DifferenceAverageOdds(y_pred_series, y_real_df, 'Age', 'income', privileged, unprivileged, [0, 1])
+        batch_DEO = DifferenceEqualOpportunity(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
+        batch_DAO = DifferenceAverageOdds(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
 
         total_DAO += batch_DAO
         total_DEO += batch_DEO
 
+        # 打印每个批次的信息
+        print(f"Epoch {epoch + 1}/{epochs}, Batch {i+1}/{len(train_loader)}, Loss: {total_batch_loss.item()}, Accuracy: {correct/labels.size(0)}, DAO: {batch_DAO}, DEO: {batch_DEO}")
+
     # 计算并打印平均损失
     avg_loss = total_loss / len(train_loader)
-    print(f"Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}")
+    print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss}")
 
     # 计算并打印准确率
     avg_accuracy = total_correct / total_examples
-    print(f"Epoch {epoch + 1}/{epochs}, Accuracy: {avg_accuracy}")
+    print(f"Epoch {epoch + 1}/{epochs}, Avg Accuracy: {avg_accuracy}")
 
     # 计算并打印DAO和DEO
     avg_DAO = total_DAO / len(train_loader)
     avg_DEO = total_DEO / len(train_loader)
-    print(f"Epoch {epoch + 1}/{epochs}, DAO: {avg_DAO}, DEO: {avg_DEO}")
+    print(f"Epoch {epoch + 1}/{epochs}, Avg DAO: {avg_DAO}, Avg DEO: {avg_DEO}")
 
+    print(y_pred)
+    print(y_real)
