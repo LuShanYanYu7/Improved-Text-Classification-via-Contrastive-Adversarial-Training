@@ -111,11 +111,15 @@ class AdultDataset(Dataset):
 
 data = pd.read_csv("data/adult.tsv", sep='\t')
 data = data.dropna()
+age_threshold = data['Age'].median()
+
 train_data, val_data = train_test_split(data, test_size=0.2, random_state=42)
 
 # 请注意，BERT模型通常对自然语言文本的理解能力较强，如果特征本身足够表达它们的含义，那么在某些情况下，不包含列名可能也能取得良好的效果。
 train_data['text'] = train_data.apply(combine_features, axis=1)
+train_data['Age'] = (train_data['Age'] >= age_threshold).astype(int)
 val_data['text'] = val_data.apply(combine_features, axis=1)
+val_data['Age'] = (val_data['Age'] >= age_threshold).astype(int)
 
 train_dataset = AdultDataset(train_data, tokenizer)
 val_dataset = AdultDataset(val_data, tokenizer)
@@ -190,7 +194,7 @@ for epoch in range(epochs):
 
         # 计算DAO和DEO
         y_pred = predicted
-        y_real = {'income': labels, 'Age': batch['protected']}  # 假设'Age'是敏感特征
+        y_real = {'income': labels, 'Age': protected}  # 假设'Age'是敏感特征
         privileged = 1
         unprivileged = 0
 
@@ -215,6 +219,3 @@ for epoch in range(epochs):
     avg_DAO = total_DAO / len(train_loader)
     avg_DEO = total_DEO / len(train_loader)
     print(f"Epoch {epoch + 1}/{epochs}, Avg DAO: {avg_DAO}, Avg DEO: {avg_DEO}")
-
-    print(y_pred)
-    print(y_real)
