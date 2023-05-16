@@ -38,10 +38,10 @@ def DifferenceEqualOpportunity(y_pred, y_real, SensitiveCat, outcome, privileged
     :param labels: both priv-unpriv value for CFmatrix
     :return:
     '''
-    y_priv = y_pred[y_real[SensitiveCat] == privileged]
-    y_real_priv = y_real[y_real[SensitiveCat] == privileged][outcome]
-    y_unpriv = y_pred[y_real[SensitiveCat] == unprivileged]
-    y_real_unpriv = y_real[y_real[SensitiveCat] == unprivileged][outcome]
+    y_priv = y_pred[y_real[SensitiveCat]==privileged]
+    y_real_priv = y_real[outcome][y_real[SensitiveCat]==privileged]
+    y_unpriv = y_pred[y_real[SensitiveCat]==unprivileged]
+    y_real_unpriv = y_real[outcome][y_real[SensitiveCat]==unprivileged]
     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix_torch(y_real_priv, y_priv, labels)
     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix_torch(y_real_unpriv, y_unpriv, labels)
 
@@ -61,10 +61,10 @@ def DifferenceAverageOdds(y_pred, y_real, SensitiveCat, outcome, privileged, unp
     :param labels:
     :return:
     '''
-    y_priv = y_pred[y_real[SensitiveCat] == privileged]
-    y_real_priv = y_real[y_real[SensitiveCat] == privileged][outcome]
-    y_unpriv = y_pred[y_real[SensitiveCat] == unprivileged]
-    y_real_unpriv = y_real[y_real[SensitiveCat] == unprivileged][outcome]
+    y_priv = y_pred[y_real[SensitiveCat]==privileged]
+    y_real_priv = y_real[outcome][y_real[SensitiveCat]==privileged]
+    y_unpriv = y_pred[y_real[SensitiveCat]==unprivileged]
+    y_real_unpriv = y_real[outcome][y_real[SensitiveCat]==unprivileged]
     TN_priv, FP_priv, FN_priv, TP_priv = confusion_matrix_torch(y_real_priv, y_priv, labels)
     TN_unpriv, FP_unpriv, FN_unpriv, TP_unpriv = confusion_matrix_torch(y_real_unpriv, y_unpriv, labels)
 
