@@ -4,10 +4,13 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 import torch.optim as optim
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertModel, AdamW
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from utils.metrics import DifferenceEqualOpportunity, DifferenceAverageOdds
+import matplotlib.pyplot as plt
+import os
+
 
 def get_gpu_memory():
     _output_to_list = lambda x: x.decode('ascii').split('\n')[:-1]
@@ -43,12 +46,10 @@ device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 # device = get_best_device()
 model.to(device)
 
-
 # 定义一个线性分类器
 # 假设任务是二分类任务
 num_labels = 2
 classifier = nn.Linear(model.config.hidden_size, num_labels).to(device)
-
 
 # 定义一个MLP
 mlp = nn.Sequential(
@@ -57,17 +58,15 @@ mlp = nn.Sequential(
     nn.Linear(model.config.hidden_size, model.config.hidden_size),
 ).to(device)
 
-
 # 初始化优化器
-optimizer = optim.Adam(list(model.parameters()) + list(classifier.parameters()), lr=2e-5)
-
+# Change optimizer to AdamW with weight decay 0.01
+optimizer = AdamW(list(model.parameters()) + list(classifier.parameters()), lr=2e-5, weight_decay=0.01)
 
 # 用于计算cosine similarity的函数
-cosine_similarity = nn.CosineSimilarity(dim=1, eps=1e-6)
-
+cosine_similarity = nn.CosineSimilarity(dim=1, eps=1e-3)
 
 # 设置epsilon
-epsilon = 0.01
+epsilon = 0.001
 
 
 # 定义输入文本和标签
@@ -77,8 +76,10 @@ epsilon = 0.01
 def combine_features_raw(row):
     return f"{row['Age']} {row['workclass']} {row['education']} {row['occupation']} {row['race']} {row['gender']}"
 
+
 def combine_features(row):
     return f"Age: {row['Age']} Workclass: {row['workclass']} Education: {row['education']} Occupation: {row['occupation']} Race: {row['race']} Gender: {row['gender']} "
+
 
 class AdultDataset(Dataset):
     def __init__(self, data, tokenizer, max_length=512):
@@ -109,6 +110,7 @@ class AdultDataset(Dataset):
             'protected': torch.tensor(protected, dtype=torch.long)
         }
 
+
 data = pd.read_csv("data/adult.tsv", sep='\t')
 data = data.dropna()
 age_threshold = data['Age'].median()
@@ -130,9 +132,13 @@ val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 # val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
 
-# epochs = 5
-epochs = 1
+epochs = 3
 # 开始训练模型
+accuracy_list = []
+DAO_list = []
+DEO_list = []
+loss_list = []
+
 for epoch in range(epochs):
     total_loss = 0
     total_correct = 0
@@ -145,12 +151,13 @@ for epoch in range(epochs):
     classifier.train()
 
     for i, batch in enumerate(train_loader):
-        inputs = {name: tensor.to(model.device) for name, tensor in batch.items() if name in ['input_ids', 'attention_mask']}
+        inputs = {name: tensor.to(model.device) for name, tensor in batch.items() if
+                  name in ['input_ids', 'attention_mask']}
         labels = batch['label'].to(model.device)
         protected = batch['protected'].to(model.device)
 
         # 计算模型的输出
-        outputs = model(**inputs)[0][:,0,:]
+        outputs = model(**inputs)[0][:, 0, :]
 
         # 计算原始的分类器损失
         logits = classifier(outputs)
@@ -162,11 +169,13 @@ for epoch in range(epochs):
 
         # 应用FGSM
         sign_gradient = model.embeddings.word_embeddings.weight.grad.data.sign()
-        perturbed_embeddings = model.embeddings.word_embeddings.weight + epsilon * sign_gradient
+        # 通过 epsilon 来计算r
+        r = epsilon
+        perturbed_embeddings = model.embeddings.word_embeddings.weight + r * sign_gradient
 
         # 将对抗样本输入模型
         model.embeddings.word_embeddings.weight.data = perturbed_embeddings
-        perturbed_outputs = model(**inputs)[0][:,0,:]
+        perturbed_outputs = model(**inputs)[0][:, 0, :]
 
         # 计算扰动后的分类器损失
         perturbed_logits = classifier(perturbed_outputs)
@@ -178,7 +187,9 @@ for epoch in range(epochs):
         mlp_similarity_loss = 1 - cosine_similarity(mlp_outputs, mlp_perturbed_outputs).mean()
 
         # 计算总损失
-        total_batch_loss = original_loss + perturbed_loss + mlp_similarity_loss
+        # Lambda = [0.1,0.2,0.3,0.4,0.5]
+        Lambda = 0.5
+        total_batch_loss = (1 - Lambda) * (original_loss + perturbed_loss) / 2 + mlp_similarity_loss * Lambda
         total_loss += total_batch_loss.item()
 
         # 反向传播和优化
@@ -205,17 +216,65 @@ for epoch in range(epochs):
         total_DEO += batch_DEO
 
         # 打印每个批次的信息
-        print(f"Epoch {epoch + 1}/{epochs}, Batch {i+1}/{len(train_loader)}, Loss: {total_batch_loss.item()}, Accuracy: {correct/labels.size(0)}, DAO: {batch_DAO}, DEO: {batch_DEO}")
+        print(
+            f"Epoch {epoch + 1}/{epochs}, Batch {i + 1}/{len(train_loader)}, Loss: {total_batch_loss.item()}, Accuracy: {correct / labels.size(0)}, DAO: {batch_DAO}, DEO: {batch_DEO}")
+
+    # 每个epoch结束后，保存模型
+    torch.save(model.state_dict(), f"result/model_epoch_{epoch}.pt")
 
     # 计算并打印平均损失
     avg_loss = total_loss / len(train_loader)
+    loss_list.append(avg_loss)
     print(f"Epoch {epoch + 1}/{epochs}, Avg Loss: {avg_loss}")
 
     # 计算并打印准确率
     avg_accuracy = total_correct / total_examples
+    accuracy_list.append(avg_accuracy)
     print(f"Epoch {epoch + 1}/{epochs}, Avg Accuracy: {avg_accuracy}")
 
     # 计算并打印DAO和DEO
     avg_DAO = total_DAO / len(train_loader)
     avg_DEO = total_DEO / len(train_loader)
+    DAO_list.append(avg_DAO)
+    DEO_list.append(avg_DEO)
     print(f"Epoch {epoch + 1}/{epochs}, Avg DAO: {avg_DAO}, Avg DEO: {avg_DEO}")
+
+# 创建一个名为 "result" 的文件夹，如果它不存在的话
+if not os.path.exists('result'):
+    os.makedirs('result')
+
+# loss
+plt.figure()
+plt.plot(range(epochs), accuracy_list)
+plt.title('loss over epochs')
+plt.xlabel('Epochs')
+plt.ylabel('loss')
+plt.savefig('result/loss.png')  # Save the figure
+plt.close()
+
+# Accuracy
+plt.figure()
+plt.plot(range(epochs), accuracy_list)
+plt.title('Accuracy over epochs')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.savefig('result/accuracy.png')  # Save the figure
+plt.close()
+
+# DAO
+plt.figure()
+plt.plot(range(epochs), DAO_list)
+plt.title('DAO over epochs')
+plt.xlabel('Epochs')
+plt.ylabel('DAO')
+plt.savefig('result/DAO.png')  # Save the figure
+plt.close()
+
+# DEO
+plt.figure()
+plt.plot(range(epochs), DEO_list)
+plt.title('DEO over epochs')
+plt.xlabel('Epochs')
+plt.ylabel('DEO')
+plt.savefig('result/DEO.png')  # Save the figure
+plt.close()
