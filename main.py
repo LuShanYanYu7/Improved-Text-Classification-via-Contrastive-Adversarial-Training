@@ -4,12 +4,12 @@ import torch.nn as nn
 import pandas as pd
 import numpy as np
 import torch.optim as optim
+import matplotlib.pyplot as plt
+import os
 from transformers import BertTokenizer, BertModel, AdamW
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from utils.metrics import DifferenceEqualOpportunity, DifferenceAverageOdds
-import matplotlib.pyplot as plt
-import os
 
 
 def get_gpu_memory():
@@ -38,6 +38,35 @@ def get_best_device():
         return torch.device("cpu")
 
 
+# 用于计算L_ctr
+class ContrastiveLoss(nn.Module):
+    def __init__(self, batch_size, temperature=0.05):
+        super().__init__()
+        self.batch_size = batch_size
+        self.register_buffer("temperature", torch.tensor(temperature).to(device))  # 超参数 温度
+        self.register_buffer("negatives_mask", (
+            ~torch.eye(batch_size * 2, batch_size * 2, dtype=bool).to(device)).float())  # 主对角线为0，其余位置全为1的mask矩阵
+
+    def forward(self, emb_i, emb_j):  # emb_i, emb_j 是来自文本，i为初始文本的embedding,j为添加扰动后的embedding
+        z_i = nn.functional.normalize(emb_i, dim=1)
+        z_j = nn.functional.normalize(emb_j, dim=1)
+
+        representations = torch.cat([z_i, z_j], dim=0)
+        similarity_matrix = nn.functional.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0),
+                                                            dim=2)
+
+        sim_ij = torch.diag(similarity_matrix, self.batch_size)
+        sim_ji = torch.diag(similarity_matrix, -self.batch_size)
+        positives = torch.cat([sim_ij, sim_ji], dim=0)
+
+        nominator = torch.exp(positives / self.temperature)
+        denominator = self.negatives_mask * torch.exp(similarity_matrix / self.temperature)
+
+        loss_partial = -torch.log(nominator / torch.sum(denominator, dim=1))
+        loss = torch.sum(loss_partial) / (2 * self.batch_size)
+        return loss
+
+
 # 初始化模型和分词器
 model_name = 'bert-base-uncased'
 model = BertModel.from_pretrained(model_name)
@@ -48,24 +77,23 @@ model.to(device)
 
 # 定义一个线性分类器
 # 假设任务是二分类任务
-num_labels = 2
+num_labels = 2  # number of classed
 classifier = nn.Linear(model.config.hidden_size, num_labels).to(device)
 
 # 定义一个MLP
+d_k = 300
 mlp = nn.Sequential(
     nn.Linear(model.config.hidden_size, model.config.hidden_size),
     nn.ReLU(),
-    nn.Linear(model.config.hidden_size, model.config.hidden_size),
+    nn.Linear(model.config.hidden_size, d_k),
 ).to(device)
 
 # 初始化优化器
 # Change optimizer to AdamW with weight decay 0.01
 optimizer = AdamW(list(model.parameters()) + list(classifier.parameters()), lr=2e-5, weight_decay=0.01)
 
-# 用于计算cosine similarity的函数
-cosine_similarity = nn.CosineSimilarity(dim=1, eps=1e-3)
-
 # 设置epsilon
+# epsilon = [0.0001,0.001,0.005,0.02]
 epsilon = 0.001
 
 
@@ -168,10 +196,8 @@ for epoch in range(epochs):
         original_loss.backward(retain_graph=True)
 
         # 应用FGSM
-        sign_gradient = model.embeddings.word_embeddings.weight.grad.data.sign()
-        # 通过 epsilon 来计算r
-        r = epsilon
-        perturbed_embeddings = model.embeddings.word_embeddings.weight + r * sign_gradient
+        normalized_gradient = torch.nn.functional.normalize(model.embeddings.word_embeddings.weight.grad.data, p=2)
+        perturbed_embeddings = model.embeddings.word_embeddings.weight + epsilon * normalized_gradient
 
         # 将对抗样本输入模型
         model.embeddings.word_embeddings.weight.data = perturbed_embeddings
@@ -184,7 +210,11 @@ for epoch in range(epochs):
         # 计算MLP损失
         mlp_outputs = mlp(outputs)
         mlp_perturbed_outputs = mlp(perturbed_outputs)
-        mlp_similarity_loss = 1 - cosine_similarity(mlp_outputs, mlp_perturbed_outputs).mean()
+        # 温度系数
+        # t=[0.05,0.06,0.07,0.08,0.09,0.10]
+        t = 0.05
+        loss_func = ContrastiveLoss(batch_size=16, temperature=t)
+        mlp_similarity_loss = loss_func(outputs, perturbed_outputs)
 
         # 计算总损失
         # Lambda = [0.1,0.2,0.3,0.4,0.5]
