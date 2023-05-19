@@ -1,0 +1,171 @@
+import torch
+import subprocess
+from torch.utils.data import Dataset, DataLoader
+from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import BertTokenizer, BertForSequenceClassification
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from utils.metrics import accuracy, discrimination, consistency, DifferenceEqualOpportunity, DifferenceAverageOdds
+
+
+def get_gpu_memory():
+    _output_to_list = lambda x: x.decode('ascii').split('\n')[:-1]
+
+    ACCEPTABLE_AVAILABLE_MEMORY = 1024 * 1024  # bytes
+    COMMAND = "nvidia-smi --query-gpu=memory.free --format=csv"
+
+    memory_free_info = _output_to_list(subprocess.check_output(COMMAND.split()))[1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values
+
+def get_best_device():
+    if torch.cuda.is_available():
+        best_device = None
+        best_memory = 0
+        for i in range(torch.cuda.device_count()):
+            device = torch.device(f"cuda:{i}")
+            available = get_gpu_memory()[i]
+            if available > best_memory:
+                best_memory = available
+                best_device = device
+        return best_device
+    else:
+        return torch.device("cpu")
+
+
+# 首先，将这些特征合并成一个文本字符串。
+# 在以下示例中，我将 'Age', 'workclass', 'education', 'occupation', 'race', 'gender' 这些特征合并成一个文本字符串
+def combine_features_raw(row):
+    return f"{row['Age']} {row['workclass']} {row['education']} {row['occupation']} {row['race']} {row['gender']}"
+
+def combine_features(row):
+    return f"Age: {row['Age']} Workclass: {row['workclass']} Education: {row['education']} Occupation: {row['occupation']} Race: {row['race']} Gender: {row['gender']} "
+
+class AdultDataset(Dataset):
+    def __init__(self, data, tokenizer, max_length=512):
+        self.data = data
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        text = self.data.iloc[idx]['text']  # 请根据实际情况修改文本字段
+        label = self.data.iloc[idx]['income']  # 请根据实际情况修改标签字段
+        protected = self.data.iloc[idx]['Age']  # 请根据实际情况修改受保护特征字段
+        encoding = self.tokenizer.encode_plus(
+            text,
+            add_special_tokens=True,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt'
+        )
+        return {
+            'input_ids': encoding['input_ids'].flatten(),
+            'attention_mask': encoding['attention_mask'].flatten(),
+            'label': torch.tensor(label, dtype=torch.long),
+            'protected': torch.tensor(protected, dtype=torch.long)
+        }
+
+def train_epoch(model, data_loader, optimizer, scheduler, device):
+    model.train()
+    total_train_loss = 0
+
+    for batch in data_loader:
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        labels = batch["label"].to(device)
+
+        model.zero_grad()
+
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        loss = outputs.loss
+
+        total_train_loss += loss.item()
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        scheduler.step()
+
+    avg_train_loss = total_train_loss / len(data_loader)
+    return avg_train_loss
+
+def eval_epoch(model, data_loader, device):
+    model.eval()
+    total_val_loss = 0
+    correct_predictions = 0
+    all_preds = []
+    all_true_labels = []
+    all_protected = []
+
+    with torch.no_grad():
+        for batch in data_loader:
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels = batch["label"].to(device)
+            protected = batch["protected"].to(device)
+
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            logits = outputs.logits
+
+            total_val_loss += loss.item()
+
+            preds = torch.argmax(logits, dim=1)
+            correct_predictions += torch.sum(preds == labels)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_true_labels.extend(labels.cpu().numpy())
+            all_protected.extend(protected.cpu().numpy())
+
+    val_loss = total_val_loss / len(data_loader)
+    val_acc = correct_predictions.double() / len(data_loader.dataset)
+
+    return val_loss, val_acc, all_preds, all_true_labels, all_protected
+
+data = pd.read_csv("data/adult.tsv", sep='\t')
+data = data.dropna()
+train_data, val_data = train_test_split(data, test_size=0.2, random_state=42)
+# 请注意，BERT模型通常对自然语言文本的理解能力较强，如果特征本身足够表达它们的含义，那么在某些情况下，不包含列名可能也能取得良好的效果。
+train_data['text'] = train_data.apply(combine_features, axis=1)
+val_data['text'] = val_data.apply(combine_features, axis=1)
+
+tokenizer = BertTokenizer.from_pretrained("./bert-base-uncased")
+train_dataset = AdultDataset(train_data, tokenizer)
+val_dataset = AdultDataset(val_data, tokenizer)
+
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
+# device = get_best_device()
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=len(train_loader) * 3)
+
+epochs = 3  # 请根据实际情况调整训练轮数
+print("----------start----------")
+privileged_value = 1
+unprivileged_value = 0
+for epoch in range(epochs):
+    train_loss = train_epoch(model, train_loader, optimizer, scheduler, device)
+    val_loss, val_acc, val_preds, val_true_labels, val_protected = eval_epoch(model, val_loader, device)
+
+    y_pred = val_preds
+    y_real = {'income': val_true_labels, 'Age': val_protected}  # 假设'Age'是敏感特征
+    privileged = 1
+    unprivileged = 0
+
+    acc = accuracy(val_true_labels_series, val_preds_series)
+    deo = DifferenceEqualOpportunity_1(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
+    dao = DifferenceAverageOdds_1(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
+
+    print(f"Epoch: {epoch+1}/{epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Accuracy: {acc:.4f} | DEO: {deo:.4f} | DAO: {dao:.4f}")
