@@ -48,6 +48,9 @@ class ContrastiveLoss(nn.Module):
             ~torch.eye(batch_size * 2, batch_size * 2, dtype=bool).to(device)).float())  # 主对角线为0，其余位置全为1的mask矩阵
 
     def forward(self, emb_i, emb_j):  # emb_i, emb_j 是来自文本，i为初始文本的embedding,j为添加扰动后的embedding
+        # print("Size of mlp_outputs: ", emb_i.size())
+        # print("Size of mlp_perturbed_outputs: ", emb_j.size())
+        # print("Size of batch:", self.batch_size)
         z_i = nn.functional.normalize(emb_i, dim=1)
         z_j = nn.functional.normalize(emb_j, dim=1)
 
@@ -67,11 +70,61 @@ class ContrastiveLoss(nn.Module):
         return loss
 
 
+# class ContrastiveLossELI5(nn.Module):
+#     def __init__(self, batch_size, temperature=0.5, verbose=True):
+#         super().__init__()
+#         self.batch_size = batch_size
+#         self.register_buffer("temperature", torch.tensor(temperature))
+#         self.verbose = verbose
+#
+#     def forward(self, emb_i, emb_j):
+#         """
+#         emb_i and emb_j are batches of embeddings, where corresponding indices are pairs
+#         z_i, z_j as per SimCLR paper
+#         """
+#         print("Size of mlp_outputs: ", emb_i.size())
+#         print("Size of mlp_perturbed_outputs: ", emb_j.size())
+#         print("Size of batch:", self.batch_size)
+#         z_i = nn.functional.normalize(emb_i, dim=1)
+#         z_j = nn.functional.normalize(emb_j, dim=1)
+#
+#         representations = torch.cat([z_i, z_j], dim=0)
+#         similarity_matrix = nn.functional.cosine_similarity(representations.unsqueeze(1), representations.unsqueeze(0),
+#                                                             dim=2)
+#
+#         # if self.verbose: print("Similarity matrix\n", similarity_matrix, "\n")
+#
+#         def l_ij(i, j):
+#             z_i_, z_j_ = representations[i], representations[j]
+#             sim_i_j = similarity_matrix[i, j]
+#             # if self.verbose: print(f"sim({i}, {j})={sim_i_j}")
+#
+#             numerator = torch.exp(sim_i_j / self.temperature)
+#             one_for_not_i = torch.ones((2 * self.batch_size,)).to(device).scatter_(0, torch.tensor([i]), 0.0)
+#             # if self.verbose: print(f"1{{k!={i}}}", one_for_not_i)
+#
+#             denominator = torch.sum(
+#                 one_for_not_i * torch.exp(similarity_matrix[i, :] / self.temperature)
+#             )
+#             # if self.verbose: print("Denominator", denominator)
+#
+#             loss_ij = -torch.log(numerator / denominator)
+#             # if self.verbose: print(f"loss({i},{j})={loss_ij}\n")
+#
+#             return loss_ij.squeeze(0)
+#
+#         N = self.batch_size
+#         loss = 0.0
+#         for k in range(0, N):
+#             loss += l_ij(k, k + N) + l_ij(k + N, k)
+#         return 1.0 / (2 * N) * loss
+
+
 # 初始化模型和分词器
 model_name = 'bert-base-uncased'
 model = BertModel.from_pretrained(model_name)
 tokenizer = BertTokenizer.from_pretrained("./bert-base-uncased")
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 # device = get_best_device()
 model.to(device)
 
@@ -154,11 +207,12 @@ val_data['Age'] = (val_data['Age'] >= age_threshold).astype(int)
 train_dataset = AdultDataset(train_data, tokenizer)
 val_dataset = AdultDataset(val_data, tokenizer)
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-# train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-# val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-
+# batch_size = 8
+batch_size = 16
+# batch_size = 32
+# drop_last 丢弃多余的数据，以免最后一个batch数据大小对不上
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
 epochs = 3
 # 开始训练模型
@@ -213,10 +267,11 @@ for epoch in range(epochs):
         # 温度系数
         # t=[0.05,0.06,0.07,0.08,0.09,0.10]
         t = 0.05
-        loss_func = ContrastiveLoss(batch_size=16, temperature=t)
-        print("Size of mlp_outputs: ", mlp_outputs.size())
-        print("Size of mlp_perturbed_outputs: ", mlp_perturbed_outputs.size())
+        loss_func = ContrastiveLoss(batch_size=batch_size, temperature=t)
         mlp_similarity_loss = loss_func(mlp_outputs, mlp_perturbed_outputs)
+
+        # loss_eli5 = ContrastiveLossELI5(batch_size=batch_size, temperature=t, verbose=True)
+        # mlp_similarity_loss = loss_eli5(mlp_outputs, mlp_perturbed_outputs)
 
         # 计算总损失
         # Lambda = [0.1,0.2,0.3,0.4,0.5]
