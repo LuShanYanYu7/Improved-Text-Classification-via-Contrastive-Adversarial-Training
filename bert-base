@@ -145,7 +145,7 @@ val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
 model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
 # device = get_best_device()
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
 optimizer = AdamW(model.parameters(), lr=2e-5)
@@ -159,13 +159,12 @@ for epoch in range(epochs):
     train_loss = train_epoch(model, train_loader, optimizer, scheduler, device)
     val_loss, val_acc, val_preds, val_true_labels, val_protected = eval_epoch(model, val_loader, device)
 
-    y_pred = val_preds
-    y_real = {'income': val_true_labels, 'Age': val_protected}  # 假设'Age'是敏感特征
-    privileged = 1
-    unprivileged = 0
+    val_preds_series = pd.Series(val_preds)
+    val_true_labels_series = pd.Series(val_true_labels)
+    val_protected_series = pd.Series(val_protected)
 
     acc = accuracy(val_true_labels_series, val_preds_series)
-    deo = DifferenceEqualOpportunity_1(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
-    dao = DifferenceAverageOdds_1(y_pred, y_real, 'Age', 'income', privileged, unprivileged, [0, 1])
+    deo = DifferenceEqualOpportunity_1(val_preds_series, pd.DataFrame({"SensitiveCat": val_protected_series, "Outcome": val_true_labels_series}), "SensitiveCat", "Outcome", privileged_value, unprivileged_value, [0, 1])
+    dao = DifferenceAverageOdds_1(val_preds_series,pd.DataFrame({"SensitiveCat": val_protected_series, "Outcome": val_true_labels_series}), "SensitiveCat", "Outcome", privileged_value, unprivileged_value,[0, 1])
 
     print(f"Epoch: {epoch+1}/{epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | Accuracy: {acc:.4f} | DEO: {deo:.4f} | DAO: {dao:.4f}")
