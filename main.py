@@ -71,7 +71,7 @@ class ContrastiveLoss(nn.Module):
 model_name = 'bert-base-uncased'
 model = BertModel.from_pretrained(model_name)
 tokenizer = BertTokenizer.from_pretrained("./bert-base-uncased")
-device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # device = get_best_device()
 model.to(device)
 
@@ -214,7 +214,9 @@ for epoch in range(epochs):
         # t=[0.05,0.06,0.07,0.08,0.09,0.10]
         t = 0.05
         loss_func = ContrastiveLoss(batch_size=16, temperature=t)
-        mlp_similarity_loss = loss_func(outputs, perturbed_outputs)
+        print("Size of mlp_outputs: ", mlp_outputs.size())
+        print("Size of mlp_perturbed_outputs: ", mlp_perturbed_outputs.size())
+        mlp_similarity_loss = loss_func(mlp_outputs, mlp_perturbed_outputs)
 
         # 计算总损失
         # Lambda = [0.1,0.2,0.3,0.4,0.5]
