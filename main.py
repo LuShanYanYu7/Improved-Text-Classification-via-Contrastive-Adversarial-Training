@@ -194,6 +194,7 @@ class AdultDataset(Dataset):
 
 data = pd.read_csv("data/adult.tsv", sep='\t')
 data = data.dropna()
+# 计算Age属性的平均值 将任务转化为二分类任务
 age_threshold = data['Age'].median()
 
 train_data, val_data = train_test_split(data, test_size=0.2, random_state=42)
@@ -210,7 +211,7 @@ val_dataset = AdultDataset(val_data, tokenizer)
 # batch_size = 8
 batch_size = 16
 # batch_size = 32
-# drop_last 丢弃多余的数据，以免最后一个batch数据大小对不上
+# drop_last=True 丢弃多余的数据，以免最后一个batch数据大小对不上，导致计算ContrastiveLoss时报错
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
@@ -239,6 +240,7 @@ for epoch in range(epochs):
         protected = batch['protected'].to(model.device)
 
         # 计算模型的输出
+        # 注意 这里的outputs指的就是[CLS]的输出
         outputs = model(**inputs)[0][:, 0, :]
 
         # 计算原始的分类器损失
@@ -251,7 +253,7 @@ for epoch in range(epochs):
 
         # 应用FGSM
         normalized_gradient = torch.nn.functional.normalize(model.embeddings.word_embeddings.weight.grad.data, p=2)
-        perturbed_embeddings = model.embeddings.word_embeddings.weight + epsilon * normalized_gradient
+        perturbed_embeddings = model.embeddings.word_embeddings.weight - epsilon * normalized_gradient
 
         # 将对抗样本输入模型
         model.embeddings.word_embeddings.weight.data = perturbed_embeddings
